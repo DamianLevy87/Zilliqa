@@ -408,6 +408,12 @@ const unsigned int PENDING_TXN_QUERY_MAX_RESULTS{
     ReadConstantNumeric("PENDING_TXN_QUERY_MAX_RESULTS", "node.jsonrpc.")};
 const bool CONNECTION_IO_USE_EPOLL{
     ReadConstantString("CONNECTION_IO_USE_EPOLL", "node.jsonrpc.") == "true"};
+const unsigned int CONNECTION_RPC_TIMEOUT{
+    ReadConstantNumeric("CONNECTION_RPC_TIMEOUT", "node.jsonrpc.")};
+const unsigned int CONNECTION_RPC_CONNECTION_LIMIT{
+    ReadConstantNumeric("CONNECTION_RPC_CONNECTION_LIMIT", "node.jsonrpc.")};
+const unsigned int CONNECTION_RPC_REUSE{
+    ReadConstantNumeric("CONNECTION_RPC_REUSE", "node.jsonrpc.")};
 
 // Network composition constants
 const unsigned int COMM_SIZE{

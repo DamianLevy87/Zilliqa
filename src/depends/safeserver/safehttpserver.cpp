@@ -60,7 +60,7 @@ bool SafeHttpServer::StartListening() {
     unsigned int mhd_flags = 0;
 
     // Temp fix with useEpoll until proper solution for CLOSE_WAIT
-    if (CONNECTION_IO_USE_EPOLL && useEpoll) {
+    if (CONNECTION_IO_USE_EPOLL) {
     
       const bool has_epoll =
           (MHD_is_feature_supported(MHD_FEATURE_EPOLL) == MHD_YES);
@@ -93,7 +93,9 @@ bool SafeHttpServer::StartListening() {
       this->daemon = MHD_start_daemon(
           mhd_flags, this->port, NULL, NULL, SafeHttpServer::callback, this,
           MHD_OPTION_THREAD_POOL_SIZE, this->threads, MHD_OPTION_SOCK_ADDR,
-          (struct sockaddr *)(&(this->loopback_addr)), MHD_OPTION_END);
+          (struct sockaddr *)(&(this->loopback_addr)),
+          MHD_OPTION_CONNECTION_TIMEOUT, CONNECTION_RPC_TIMEOUT,
+           MHD_OPTION_END);
 
     } else if (!this->path_sslcert.empty() && !this->path_sslkey.empty()) {
       try {
@@ -106,15 +108,31 @@ bool SafeHttpServer::StartListening() {
             SafeHttpServer::callback, this, MHD_OPTION_HTTPS_MEM_KEY,
             this->sslkey.c_str(), MHD_OPTION_HTTPS_MEM_CERT,
             this->sslcert.c_str(), MHD_OPTION_THREAD_POOL_SIZE, this->threads,
+            MHD_OPTION_CONNECTION_TIMEOUT, CONNECTION_RPC_TIMEOUT,
             MHD_OPTION_END);
       } catch (JsonRpcException &ex) {
         return false;
       }
     } else {
       LOG_GENERAL(INFO, "Start Listening, mhdflag: " << mhd_flags);
-      this->daemon = MHD_start_daemon(
+
+      if ((unsigned int)port == STAKING_RPC_PORT) {
+        this->daemon = MHD_start_daemon(
+          mhd_flags, this->port, SafeHttpServer::notify_policy_callback, NULL, SafeHttpServer::callback, this,
+          MHD_OPTION_THREAD_POOL_SIZE, this->threads,
+          // MHD_OPTION_CONNECTION_LIMIT, CONNECTION_RPC_CONNECTION_LIMIT,
+          // MHD_OPTION_LISTENING_ADDRESS_REUSE, CONNECTION_RPC_REUSE,
+          MHD_OPTION_CONNECTION_TIMEOUT, CONNECTION_RPC_TIMEOUT,
+          MHD_OPTION_URI_LOG_CALLBACK, &SafeHttpServer::log_callback, NULL,
+          MHD_OPTION_NOTIFY_COMPLETED, &SafeHttpServer::notify_completed_callback, NULL,
+          MHD_OPTION_NOTIFY_CONNECTION, &SafeHttpServer::notify_connection_callback, NULL,
+          MHD_OPTION_END);
+      } else {
+        this->daemon = MHD_start_daemon(
           mhd_flags, this->port, NULL, NULL, SafeHttpServer::callback, this,
-          MHD_OPTION_THREAD_POOL_SIZE, this->threads, MHD_OPTION_END);
+          MHD_OPTION_THREAD_POOL_SIZE, this->threads,
+          MHD_OPTION_END);
+      }
     }
     if (this->daemon != NULL)
       this->running = true;
@@ -140,6 +158,9 @@ bool SafeHttpServer::SendResponse(const string &response, void *addInfo) {
   
   MHD_add_response_header(result, "Content-Type", "application/json");
   MHD_add_response_header(result, "Access-Control-Allow-Origin", "*");
+  MHD_add_response_header(result,
+                         MHD_HTTP_HEADER_CONNECTION,
+                         "close");
 
   int ret = MHD_queue_response(client_connection->connection,
                                client_connection->code, result);
@@ -158,7 +179,9 @@ bool SafeHttpServer::SendOptionsResponse(void *addInfo) {
   MHD_add_response_header(result, "Access-Control-Allow-Headers",
                           "origin, content-type, accept");
   MHD_add_response_header(result, "DAV", "1");
-
+  MHD_add_response_header(result,
+                         MHD_HTTP_HEADER_CONNECTION,
+                         "close");
   int ret = MHD_queue_response(client_connection->connection,
                                client_connection->code, result);
   MHD_destroy_response(result);
@@ -175,19 +198,35 @@ int SafeHttpServer::callback(void *cls, MHD_Connection *connection, const char *
                          const char *method, const char *version,
                          const char *upload_data, size_t *upload_data_size,
                          void **con_cls) {
+  LOG_MARKER();
+  
+  
+  uint16_t port = 0;
+  
+  auto client_addr = MHD_get_connection_info(connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS)->client_addr;
+  struct sockaddr_in *addr_in = (struct sockaddr_in *)client_addr;
+  char *s = inet_ntoa(addr_in->sin_addr);
+  port = ntohs(addr_in->sin_port);
+  
+  LOG_GENERAL(INFO, "SafeHttpServer callback - PORT: " << port << " IP: " << s);
+
   (void)version;
   if (*con_cls == NULL) {
+    LOG_GENERAL(INFO, "NULL" << port);
+
     struct mhd_coninfo *client_connection = new mhd_coninfo;
     client_connection->connection = connection;
     client_connection->server = static_cast<SafeHttpServer *>(cls);
     *con_cls = client_connection;
     return MHD_YES;
   }
+
   struct mhd_coninfo *client_connection =
       static_cast<struct mhd_coninfo *>(*con_cls);
-    
+  
   if (string("POST") == method) {
     if (*upload_data_size != 0) {
+      LOG_GENERAL(INFO, "upload_data_size != 0, PORT: " << port);
       client_connection->request.write(upload_data, *upload_data_size);
       *upload_data_size = 0;
       return MHD_YES;
@@ -196,19 +235,28 @@ int SafeHttpServer::callback(void *cls, MHD_Connection *connection, const char *
       IClientConnectionHandler *handler =
           client_connection->server->GetHandler(string(url));
       if (handler == NULL) {
+              LOG_GENERAL(INFO, "No client connection handler found, PORT: " << port);
+
         client_connection->code = MHD_HTTP_INTERNAL_SERVER_ERROR;
         client_connection->server->SendResponse(
             "No client connection handler found", client_connection);
       } else {
+
+                      LOG_GENERAL(INFO, "HandleRequest, PORT: " << port);
+
         client_connection->code = MHD_HTTP_OK;
         handler->HandleRequest(client_connection->request.str(), response);
         client_connection->server->SendResponse(response, client_connection);
       }
     }
   } else if (string("OPTIONS") == method) {
+                          LOG_GENERAL(INFO, "OPTIONS, PORT: " << port);
+
     client_connection->code = MHD_HTTP_OK;
     client_connection->server->SendOptionsResponse(client_connection);
   } else {
+                              LOG_GENERAL(INFO, "Not allowed HTTP Method, PORT: " << port);
+
     client_connection->code = MHD_HTTP_METHOD_NOT_ALLOWED;
     client_connection->server->SendResponse("Not allowed HTTP Method",
                                             client_connection);
@@ -222,6 +270,103 @@ int SafeHttpServer::callback(void *cls, MHD_Connection *connection, const char *
   return MHD_YES;
 }
 
+void* SafeHttpServer::log_callback(void *cls,
+        const char* uri,
+        struct MHD_Connection* connection)
+{
+  LOG_MARKER();
+  (void) cls;
+  (void) connection;  /* Unused. Silent compiler warning. */
+
+  LOG_GENERAL(INFO, uri);
+
+  return NULL;
+}
+
+
+void SafeHttpServer::notify_completed_callback(void* cls,
+                     struct MHD_Connection* connection,
+                     void** con_cls,
+                     enum MHD_RequestTerminationCode toe)
+{
+  LOG_MARKER();
+
+  (void) cls;
+  (void) connection;  /* Unused. Silent compiler warning. */
+  (void) con_cls;
+  if (toe == MHD_REQUEST_TERMINATED_COMPLETED_OK) {
+    LOG_GENERAL(INFO, "MHD_REQUEST_TERMINATED_COMPLETED_OK");
+  } else if (toe == MHD_REQUEST_TERMINATED_WITH_ERROR) {
+    LOG_GENERAL(INFO, "MHD_REQUEST_TERMINATED_WITH_ERROR");
+  } else if (toe == MHD_REQUEST_TERMINATED_TIMEOUT_REACHED) {
+    LOG_GENERAL(INFO, "MHD_REQUEST_TERMINATED_TIMEOUT_REACHED");
+  } else if (toe == MHD_REQUEST_TERMINATED_DAEMON_SHUTDOWN) {
+    LOG_GENERAL(INFO, "MHD_REQUEST_TERMINATED_DAEMON_SHUTDOWN");
+  } else if (toe == MHD_REQUEST_TERMINATED_READ_ERROR) {
+    LOG_GENERAL(INFO, "MHD_REQUEST_TERMINATED_READ_ERROR");
+  } else if (toe == MHD_REQUEST_TERMINATED_CLIENT_ABORT) {
+    LOG_GENERAL(INFO, "MHD_REQUEST_TERMINATED_CLIENT_ABORT");
+    auto client_addr = MHD_get_connection_info(connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS)->client_addr;
+    struct sockaddr_in *addr_in = (struct sockaddr_in *)client_addr;
+    char *s = inet_ntoa(addr_in->sin_addr);
+    LOG_GENERAL(INFO, "IP: " << s);
+
+  } else {
+    LOG_GENERAL(INFO, "Something is wrong: " << (unsigned int)toe);
+  }
+}
+
+
+
+void SafeHttpServer::notify_connection_callback(void* cls,
+                      struct MHD_Connection* connection,
+                      void** socket_context,
+                      enum MHD_ConnectionNotificationCode toe)
+{
+  LOG_MARKER();
+  (void) socket_context;
+  (void) cls;
+  
+    auto client_addr = MHD_get_connection_info(connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS)->client_addr;
+    struct sockaddr_in *addr_in = (struct sockaddr_in *)client_addr;
+    char *s = inet_ntoa(addr_in->sin_addr);
+    LOG_GENERAL(INFO, "IP: " << s);
+
+  switch (toe)
+  {
+  case MHD_CONNECTION_NOTIFY_STARTED:
+    LOG_GENERAL(INFO, "started");
+    break;
+  case MHD_CONNECTION_NOTIFY_CLOSED:
+    LOG_GENERAL(INFO, "stopped");
+    break;
+  }
+}
+
+int SafeHttpServer::notify_policy_callback(void *cls,
+                             const struct sockaddr *addr,
+                             socklen_t addrlen) {
+    LOG_MARKER();
+
+
+  (void) cls;
+  (void) addrlen;
+
+  uint16_t port = 0;
+  
+  struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
+  char *s = inet_ntoa(addr_in->sin_addr);
+  port = ntohs(addr_in->sin_port);
+  
+  LOG_GENERAL(INFO, "SafeHttpServer notify_policy_callback - PORT: " << port << " IP: " << s);
+
+  // Temporary toggle
+  if (CONNECTION_RPC_REUSE)
+    return MHD_NO;
+  
+
+  return MHD_YES;
+}
 
 SafeHttpServer &SafeHttpServer::BindLocalhost() {
   this->bindlocalhost = true;

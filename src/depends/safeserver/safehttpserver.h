@@ -85,6 +85,27 @@ private:
                       const char *upload_data, size_t *upload_data_size,
                       void **con_cls);
 
+  static void* log_callback(void *cls,
+        const char *uri,
+        struct MHD_Connection *con);
+
+  static void
+  notify_completed_callback(void *cls,
+          struct MHD_Connection *connection,
+          void **con_cls,
+          enum MHD_RequestTerminationCode toe);
+
+  static void
+  notify_connection_callback(void *cls,
+                      struct MHD_Connection *connection,
+                      void **socket_context,
+                      enum MHD_ConnectionNotificationCode toe);
+
+static int notify_policy_callback(void *cls,
+                             const struct sockaddr *addr,
+                             socklen_t addrlen);
+
+
   IClientConnectionHandler *GetHandler(const std::string &url);
 };
 
